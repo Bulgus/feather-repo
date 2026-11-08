@@ -1,100 +1,71 @@
 # feather-repo/.github/workflows/publish.yml
-# Workflow RÉUTILISABLE : toute la logique est ici, une seule fois.
-# Les apps l'appellent avec ~10 lignes (voir feather-caller.yml).
+# Workflow réutilisable "tout-en-un" : build standard (macOS) puis publication (publish-ipa.yml, Linux).
+# Les inputs xcode_version / prebuild / runner couvrent la plupart des cas particuliers (Expo, CocoaPods…).
 
-name: Publish to Feather (reusable)
+name: Build & publish to Feather
 
 on:
   workflow_call:
     inputs:
-      scheme:      { required: true,  type: string }
-      bundle_id:   { required: true,  type: string }
-      app_name:    { required: true,  type: string }
-      build_args:  { required: false, type: string, default: "" }   # ex: -workspace App.xcworkspace
-      feather_repo:{ required: false, type: string, default: "Bulgus/feather-repo" }
+      scheme:        { required: true,  type: string }
+      bundle_id:     { required: true,  type: string }
+      app_name:      { required: true,  type: string }
+      build_args:    { required: false, type: string, default: "" }   # ex: -workspace ios/App.xcworkspace
+      prebuild:      { required: false, type: string, default: "" }   # commandes shell avant xcodebuild
+      xcode_version: { required: false, type: string, default: "" }   # ex: "27" ; vide = Xcode par défaut du runner
+      runner:        { required: false, type: string, default: macos-latest }
 
 jobs:
-  publish:
-    runs-on: macos-latest
+  build:
+    runs-on: ${{ inputs.runner }}
     concurrency:
       group: feather-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: true
-    env:
-      SCHEME: ${{ inputs.scheme }}
-      BUNDLE_ID: ${{ inputs.bundle_id }}
-      APP_NAME: ${{ inputs.app_name }}
-      FEATHER_REPO: ${{ inputs.feather_repo }}
+    outputs:
+      version: ${{ steps.ipa.outputs.version }}
+      build: ${{ steps.ipa.outputs.build }}
     steps:
       - uses: actions/checkout@v4
 
-      # Projets générés par Claude Code sans .xcodeproj versionné
+      - name: Select Xcode
+        if: inputs.xcode_version != ''
+        run: |
+          XC=$(ls -d /Applications/Xcode_${{ inputs.xcode_version }}*.app | sort -V | tail -1)
+          [ -n "$XC" ] || { echo "::error::Xcode ${{ inputs.xcode_version }} absent de ${{ inputs.runner }}"; ls /Applications; exit 1; }
+          sudo xcode-select -s "$XC" && xcodebuild -version
+
       - name: Generate Xcode project (XcodeGen)
         run: |
           if [ -f project.yml ] && ! ls *.xcodeproj >/dev/null 2>&1; then
             brew install xcodegen && xcodegen generate
           fi
 
+      - name: Prebuild
+        if: inputs.prebuild != ''
+        run: ${{ inputs.prebuild }}
+
       - name: Build unsigned IPA
+        id: ipa
         run: |
           BUILD=${{ github.run_number }}
-          xcodebuild ${{ inputs.build_args }} -scheme "$SCHEME" -configuration Release \
+          xcodebuild ${{ inputs.build_args }} -scheme "${{ inputs.scheme }}" -configuration Release \
             -sdk iphoneos -derivedDataPath build CURRENT_PROJECT_VERSION=$BUILD \
             CODE_SIGNING_ALLOWED=NO build
           APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
           VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_PATH/Info.plist")
           mkdir Payload && cp -R "$APP_PATH" Payload/
-          IPA="$SCHEME-$VER-$BUILD.ipa"
-          zip -qry "$IPA" Payload
-          {
-            echo "VER=$VER"; echo "BUILD=$BUILD"; echo "IPA=$IPA"
-            echo "TAG=$SCHEME-$VER-$BUILD"
-          } >> "$GITHUB_ENV"
+          zip -qry app.ipa Payload
+          { echo "version=$VER"; echo "build=$BUILD"; } >> "$GITHUB_OUTPUT"
 
-      - name: Upload IPA as release
-        env:
-          GH_TOKEN: ${{ secrets.FEATHER_TOKEN }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-        run: |
-          MSG="[${GITHUB_REF_NAME}] $(echo "${COMMIT_MSG:-build manuel}" | head -1)"
-          echo "MSG=$MSG" >> "$GITHUB_ENV"
-          gh release create "$TAG" "$IPA" --repo "$FEATHER_REPO" \
-            --title "$APP_NAME $VER ($BUILD)" --notes "$MSG"
+      - uses: actions/upload-artifact@v4
+        with: { name: ipa, path: app.ipa, retention-days: 1 }
 
-      - name: Update source.json
-        env:
-          GH_TOKEN: ${{ secrets.FEATHER_TOKEN }}
-        run: |
-          SIZE=$(stat -f%z "$IPA")
-          URL="https://github.com/$FEATHER_REPO/releases/download/$TAG/$IPA"
-          git clone -q "https://x-access-token:$GH_TOKEN@github.com/$FEATHER_REPO.git" feather
-          cd feather
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-
-          update() {
-            jq --arg id "$BUNDLE_ID" --arg name "$APP_NAME" \
-               --arg v "$VER.$BUILD" --arg b "$BUILD" --arg d "$(date -u +%FT%TZ)" \
-               --arg u "$URL" --argjson s "$SIZE" --arg m "$MSG" '
-              (if any(.apps[]; .bundleIdentifier == $id) then .
-               else .apps += [{name:$name, bundleIdentifier:$id, developerName:"Aimé",
-                               localizedDescription:$name, versions:[]}] end)
-              | (.apps[] | select(.bundleIdentifier == $id) | .versions) |=
-                  ([{version:$v, buildVersion:$b, date:$d, downloadURL:$u,
-                     size:$s, localizedDescription:$m}] + . | .[:10])
-            ' source.json > tmp.json && mv tmp.json source.json
-          }
-
-          for i in 1 2 3; do
-            update
-            git commit -qam "$APP_NAME $VER ($BUILD)"
-            git push -q && break
-            git reset -q --hard HEAD~1 && git pull -q --rebase
-          done
-
-      - name: Notify (ntfy)
-        continue-on-error: true
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-        run: |
-          [ -n "$NTFY_URL" ] && curl -s -H "Title: $APP_NAME $VER ($BUILD)" \
-            -d "$MSG — dispo dans Feather" "$NTFY_URL" || true
+  publish:
+    needs: build
+    uses: Bulgus/feather-repo/.github/workflows/publish-ipa.yml@main
+    with:
+      bundle_id: ${{ inputs.bundle_id }}
+      app_name: ${{ inputs.app_name }}
+      version: ${{ needs.build.outputs.version }}
+      build: ${{ needs.build.outputs.build }}
+    secrets: inherit
