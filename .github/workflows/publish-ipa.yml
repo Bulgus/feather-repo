@@ -1,0 +1,84 @@
+# feather-repo/.github/workflows/publish-ipa.yml
+# Workflow réutilisable "publication seule" : prend une IPA (artefact) et la publie.
+# Tourne sur Linux : pas besoin de macOS pour ça, et les minutes Linux coûtent bien moins cher.
+# Utilisé par publish.yml, et directement par les apps qui ont leur propre build (Expo, etc.).
+
+name: Publish IPA to Feather
+
+on:
+  workflow_call:
+    inputs:
+      bundle_id:    { required: true,  type: string }
+      app_name:     { required: true,  type: string }
+      version:      { required: true,  type: string }   # CFBundleShortVersionString
+      build:        { required: true,  type: string }   # CFBundleVersion
+      artifact:     { required: false, type: string, default: ipa }
+      feather_repo: { required: false, type: string, default: Bulgus/feather-repo }
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      APP_NAME: ${{ inputs.app_name }}
+      VER: ${{ inputs.version }}
+      BUILD: ${{ inputs.build }}
+      FEATHER_REPO: ${{ inputs.feather_repo }}
+      GH_TOKEN: ${{ secrets.FEATHER_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: "${{ inputs.artifact }}", path: dist }
+
+      - name: Check secret
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::FEATHER_TOKEN absent (secret du repo ou de l'orga)"; exit 1; }
+
+      - name: Upload IPA as release
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          SRC=$(ls dist/*.ipa | head -1)
+          IPA="${BUNDLE_ID}-${VER}-${BUILD}.ipa"
+          TAG="${BUNDLE_ID}-${VER}-${BUILD}"
+          mv "$SRC" "$IPA"
+          MSG="[${GITHUB_REF_NAME}] $(echo "${COMMIT_MSG:-build manuel}" | head -1)"
+          { echo "IPA=$IPA"; echo "TAG=$TAG"; echo "MSG=$MSG"; } >> "$GITHUB_ENV"
+          gh release create "$TAG" "$IPA" --repo "$FEATHER_REPO" \
+            --title "$APP_NAME $VER ($BUILD)" --notes "$MSG"
+
+      - name: Update source.json
+        run: |
+          SIZE=$(wc -c < "$IPA" | tr -d ' ')
+          URL="https://github.com/$FEATHER_REPO/releases/download/$TAG/$IPA"
+          git clone -q "https://x-access-token:$GH_TOKEN@github.com/$FEATHER_REPO.git" feather
+          cd feather
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+
+          update() {
+            jq --arg id "$BUNDLE_ID" --arg name "$APP_NAME" \
+               --arg v "$VER.$BUILD" --arg b "$BUILD" --arg d "$(date -u +%FT%TZ)" \
+               --arg u "$URL" --argjson s "$SIZE" --arg m "$MSG" '
+              (if any(.apps[]; .bundleIdentifier == $id) then .
+               else .apps += [{name:$name, bundleIdentifier:$id, developerName:"Aimé",
+                               localizedDescription:$name, versions:[]}] end)
+              | (.apps[] | select(.bundleIdentifier == $id) | .versions) |=
+                  ([{version:$v, buildVersion:$b, date:$d, downloadURL:$u,
+                     size:$s, localizedDescription:$m}] + . | .[:10])
+            ' source.json > tmp.json && mv tmp.json source.json
+          }
+
+          for i in 1 2 3; do
+            update
+            git commit -qam "$APP_NAME $VER ($BUILD)"
+            git push -q && break
+            git reset -q --hard HEAD~1 && git pull -q --rebase
+          done
+
+      - name: Notify (ntfy)
+        continue-on-error: true
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          [ -n "$NTFY_URL" ] && curl -s -H "Title: $APP_NAME $VER ($BUILD)" \
+            -d "$MSG — dispo dans Feather" "$NTFY_URL" || true
