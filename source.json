@@ -11,6 +11,14 @@
       "iconURL": "https://raw.githubusercontent.com/Bulgus/Papillon_v8/main/assets/images/icon.png",
       "versions": [
         {
+          "version": "8.6.2.4",
+          "buildVersion": "4",
+          "date": "2026-11-09T13:12:02Z",
+          "downloadURL": "https://github.com/Bulgus/feather-repo/releases/download/xyz.getpapillon.ios-8.6.2-4/xyz.getpapillon.ios-8.6.2-4.ipa",
+          "size": 38187808,
+          "localizedDescription": "[claude/modest-lamport-srw3fn] Discussions : messages et destinataires corrigés"
+        },
+        {
           "version": "8.6.2.3",
           "buildVersion": "3",
           "date": "2026-11-09T12:34:13Z",
