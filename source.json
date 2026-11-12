@@ -11,6 +11,14 @@
       "iconURL": "https://raw.githubusercontent.com/Bulgus/Papillon_v8/main/assets/images/icon.png",
       "versions": [
         {
+          "version": "8.6.2.5",
+          "buildVersion": "5",
+          "date": "2026-11-12T21:27:27Z",
+          "downloadURL": "https://github.com/Bulgus/feather-repo/releases/download/xyz.getpapillon.ios-8.6.2-5/xyz.getpapillon.ios-8.6.2-5.ipa",
+          "size": 38188259,
+          "localizedDescription": "[claude/modest-lamport-srw3fn] Notifications de notes : plus de fausses alertes à chaque vérification"
+        },
+        {
           "version": "8.6.2.4",
           "buildVersion": "4",
           "date": "2026-11-09T13:12:02Z",
